@@ -5,7 +5,7 @@ const crypto = require("crypto");
 const os = require("os");
 
 const PORT = process.env.PORT || 3000;
-const DATA_DIR = path.join(__dirname, "data");
+const DATA_DIR = process.env.VERCEL ? path.join(os.tmpdir(), "tica-relay-data") : path.join(__dirname, "data");
 const DATA_FILE = path.join(DATA_DIR, "db.json");
 const PUBLIC_DIR = path.join(__dirname, "public");
 const INDEX_FILE = path.join(PUBLIC_DIR, "index.html");
@@ -14,9 +14,11 @@ const ADMIN_SESSION_MAX_AGE = 60 * 60 * 24 * 14;
 const DATABASE_URL = process.env.DATABASE_URL || "";
 const STORAGE_MODE = String(process.env.TICA_STORAGE || (DATABASE_URL ? "postgres" : "json")).toLowerCase();
 
-fs.mkdirSync(DATA_DIR, { recursive: true });
-if (!fs.existsSync(DATA_FILE)) {
-  fs.writeFileSync(DATA_FILE, JSON.stringify({ projects: [], admins: [], sessions: [] }, null, 2), "utf8");
+if (STORAGE_MODE !== "postgres") {
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+  if (!fs.existsSync(DATA_FILE)) {
+    fs.writeFileSync(DATA_FILE, JSON.stringify({ projects: [], admins: [], sessions: [] }, null, 2), "utf8");
+  }
 }
 
 let mutationQueue = Promise.resolve();
