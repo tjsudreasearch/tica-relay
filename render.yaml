@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: tica-relay
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: NODE_VERSION
+        value: 20
+      - key: TICA_STORAGE
+        value: postgres
+      - key: DATABASE_URL
+        sync: false
