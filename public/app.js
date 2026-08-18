@@ -1804,10 +1804,28 @@ async function bootstrapApp() {
     return;
   }
 
-  await loadAuthContext().catch(() => {
+  let storageConfigBlocked = false;
+  await loadAuthContext().catch((error) => {
+    if (error && error.status === 503) {
+      layout({
+        eyebrow: "설정 필요",
+        title: "저장소 설정이 필요합니다.",
+        subtitle: error.message,
+        content: `
+          <section class="card panel center section">
+            <div class="notice error">${esc(error.message)}</div>
+          </section>
+        `,
+      });
+      storageConfigBlocked = true;
+      return;
+    }
     authContext = { hasOwner: false, hasAdmins: false, pendingAdminCount: 0, currentAdmin: null, shareOrigin: "" };
     currentAdmin = null;
   });
+  if (storageConfigBlocked) {
+    return;
+  }
 
   if (view === "admin-setup") {
     showAdminSetupScreen();

@@ -16,8 +16,13 @@ const LOGIN_RATE_LIMIT_WINDOW_MS = 10 * 60 * 1000;
 const LOGIN_RATE_LIMIT_LOCK_MS = 15 * 60 * 1000;
 const DATABASE_URL = process.env.DATABASE_URL || "";
 const STORAGE_MODE = String(process.env.TICA_STORAGE || (DATABASE_URL ? "postgres" : "json")).toLowerCase();
+const IS_VERCEL = Boolean(process.env.VERCEL);
+const ALLOW_VERCEL_JSON_STORAGE = process.env.ALLOW_VERCEL_JSON_STORAGE === "true";
+const STORAGE_CONFIG_ERROR = IS_VERCEL && STORAGE_MODE !== "postgres" && !ALLOW_VERCEL_JSON_STORAGE
+  ? "운영 배포 저장소 설정이 필요합니다. Vercel 환경변수에 DATABASE_URL과 TICA_STORAGE=postgres를 설정해 주세요."
+  : "";
 
-if (STORAGE_MODE !== "postgres") {
+if (!STORAGE_CONFIG_ERROR && STORAGE_MODE !== "postgres") {
   fs.mkdirSync(DATA_DIR, { recursive: true });
   if (!fs.existsSync(DATA_FILE)) {
     fs.writeFileSync(DATA_FILE, JSON.stringify({ projects: [], admins: [], sessions: [] }, null, 2), "utf8");
@@ -1044,6 +1049,14 @@ async function handleRequest(req, res) {
 
     if (method === "GET" && pathname === "/favicon.ico") {
       sendNoContent(res);
+      return;
+    }
+
+    if (STORAGE_CONFIG_ERROR) {
+      sendJson(res, 503, {
+        error: STORAGE_CONFIG_ERROR,
+        storageReady: false,
+      });
       return;
     }
 
