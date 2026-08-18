@@ -1122,9 +1122,13 @@ async function handleRequest(req, res) {
     }
 
     if (method === "POST" && pathname === "/api/auth/apply") {
+      const requireLoggedOutApply = true;
       const body = await readBody(req);
       const result = await enqueueMutation(async () => {
         const db = await readDB();
+        if (requireLoggedOutApply && sessionFromRequest(req, db)) {
+          throw new Error("이미 관리자 계정으로 로그인 중입니다. 새 관리자 신청은 로그아웃 후 진행해 주세요.");
+        }
         if (!db.admins.some((admin) => admin.role === "owner")) {
           throw new Error("먼저 Owner를 생성해 주세요.");
         }

@@ -621,6 +621,8 @@ function showAdminSetupScreen(message = "") {
 
 function showAdminApplyScreen(message = "") {
   stopAutoRefresh();
+  const isLoggedInAdmin = Boolean(currentAdmin);
+  const applyDisabled = !authContext.hasOwner || isLoggedInAdmin;
   layout({
     eyebrow: "관리자 신청",
     title: "새 관리자 신청",
@@ -630,28 +632,30 @@ function showAdminApplyScreen(message = "") {
       <section class="card panel center section">
         ${message ? `<div class="notice error">${esc(message)}</div>` : ""}
         ${!authContext.hasOwner ? '<div class="notice neutral">먼저 Owner를 만들어야 관리자 신청을 받을 수 있습니다.</div>' : ""}
+        ${isLoggedInAdmin ? '<div class="notice neutral">이미 관리자 계정으로 로그인 중입니다. 새 관리자 신청은 로그아웃 후 진행해 주세요.</div>' : ""}
         <div class="form-grid space">
           <div class="field full">
             <label for="applyName">이름</label>
-            <input id="applyName" placeholder="예: 김OO">
+            <input id="applyName" placeholder="예: 김OO" ${applyDisabled ? "disabled" : ""}>
           </div>
           <div class="field full">
             <label for="applyAdminId">관리자 ID</label>
-            <input id="applyAdminId" placeholder="예: tica-editor">
+            <input id="applyAdminId" placeholder="예: tica-editor" ${applyDisabled ? "disabled" : ""}>
           </div>
           <div class="field">
             <label for="applyPassword">비밀번호</label>
-            <input id="applyPassword" type="password" placeholder="8자 이상">
+            <input id="applyPassword" type="password" placeholder="8자 이상" ${applyDisabled ? "disabled" : ""}>
           </div>
           <div class="field">
             <label for="applyPasswordConfirm">비밀번호 확인</label>
-            <input id="applyPasswordConfirm" type="password" placeholder="다시 입력">
+            <input id="applyPasswordConfirm" type="password" placeholder="다시 입력" ${applyDisabled ? "disabled" : ""}>
           </div>
         </div>
         <div class="actions space">
           <button class="btn secondary" onclick="showAdminSetupScreen()">Owner 생성으로</button>
           <button class="btn secondary" onclick="showAdminLoginScreen()">로그인 화면으로</button>
-          <button class="btn primary" onclick="submitAdminApply()" ${authContext.hasOwner ? "" : "disabled"}>관리자 신청</button>
+          ${isLoggedInAdmin ? '<button class="btn secondary" onclick="logoutAdmin()">로그아웃</button>' : ""}
+          <button class="btn primary" onclick="submitAdminApply()" ${applyDisabled ? "disabled" : ""}>관리자 신청</button>
         </div>
         <div id="adminApplyMessage"></div>
       </section>
