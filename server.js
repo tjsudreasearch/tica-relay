@@ -11,6 +11,9 @@ const PUBLIC_DIR = path.join(__dirname, "public");
 const INDEX_FILE = path.join(PUBLIC_DIR, "index.html");
 const ADMIN_SESSION_COOKIE = "tica_admin_session";
 const ADMIN_SESSION_MAX_AGE = 60 * 60 * 24 * 14;
+const LOGIN_RATE_LIMIT_MAX = 5;
+const LOGIN_RATE_LIMIT_WINDOW_MS = 10 * 60 * 1000;
+const LOGIN_RATE_LIMIT_LOCK_MS = 15 * 60 * 1000;
 const DATABASE_URL = process.env.DATABASE_URL || "";
 const STORAGE_MODE = String(process.env.TICA_STORAGE || (DATABASE_URL ? "postgres" : "json")).toLowerCase();
 
@@ -93,8 +96,29 @@ function normalizeSession(session) {
   return normalized;
 }
 
+function normalizeLoginAttempt(attempt) {
+  const normalized = attempt || {};
+  normalized.keyHash = String(normalized.keyHash || "");
+  normalized.count = Math.max(0, Number(normalized.count || 0));
+  normalized.firstFailedAt = normalized.firstFailedAt || now();
+  normalized.lastFailedAt = normalized.lastFailedAt || normalized.firstFailedAt;
+  normalized.lockedUntil = normalized.lockedUntil || null;
+  return normalized;
+}
+
+function normalizeAuditLog(entry) {
+  const normalized = entry || {};
+  normalized.id = String(normalized.id || randomId(10));
+  normalized.type = String(normalized.type || "unknown");
+  normalized.actorId = normalized.actorId || null;
+  normalized.targetId = normalized.targetId || null;
+  normalized.at = normalized.at || now();
+  normalized.details = normalized.details && typeof normalized.details === "object" ? normalized.details : {};
+  return normalized;
+}
+
 function defaultDB() {
-  return { projects: [], admins: [], sessions: [] };
+  return { projects: [], admins: [], sessions: [], loginAttempts: [], auditLogs: [] };
 }
 
 function normalizeDB(db) {
@@ -103,6 +127,8 @@ function normalizeDB(db) {
     projects: Array.isArray(source.projects) ? source.projects.map(normalizeProject) : [],
     admins: Array.isArray(source.admins) ? source.admins.map(normalizeAdmin) : [],
     sessions: Array.isArray(source.sessions) ? source.sessions.map(normalizeSession) : [],
+    loginAttempts: Array.isArray(source.loginAttempts) ? source.loginAttempts.map(normalizeLoginAttempt).filter((entry) => entry.keyHash) : [],
+    auditLogs: Array.isArray(source.auditLogs) ? source.auditLogs.map(normalizeAuditLog) : [],
   };
 }
 
@@ -230,6 +256,17 @@ function publicAdmin(admin) {
   };
 }
 
+function audit(db, type, actorId, targetId, details = {}) {
+  db.auditLogs.push(normalizeAuditLog({
+    id: randomId(10),
+    type,
+    actorId: actorId || null,
+    targetId: targetId || null,
+    at: now(),
+    details,
+  }));
+}
+
 function createAdminSession(db, admin) {
   if (!admin || admin.status !== "active") {
     throw new Error("활성화되지 않은 계정은 로그인할 수 없습니다.");
@@ -246,6 +283,67 @@ function createAdminSession(db, admin) {
   admin.lastLoginAt = session.createdAt;
   admin.updatedAt = session.createdAt;
   return { token, session };
+}
+
+function clientIp(req) {
+  const forwardedFor = String(req.headers["x-forwarded-for"] || "").split(",")[0].trim();
+  return forwardedFor || req.socket?.remoteAddress || "unknown";
+}
+
+function loginAttemptKey(req, adminId) {
+  return hashValue(`${normalizeAdminId(adminId) || "unknown"}:${clientIp(req)}`);
+}
+
+function dateMs(value) {
+  const parsed = Date.parse(value || "");
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function pruneLoginAttempts(db, timestampMs = Date.now()) {
+  db.loginAttempts = db.loginAttempts.filter((attempt) => {
+    const lockedUntil = dateMs(attempt.lockedUntil);
+    const lastFailedAt = dateMs(attempt.lastFailedAt);
+    return lockedUntil > timestampMs || timestampMs - lastFailedAt <= LOGIN_RATE_LIMIT_WINDOW_MS;
+  });
+}
+
+function loginRateLimitMessage(lockedUntil) {
+  const remainingMs = Math.max(0, dateMs(lockedUntil) - Date.now());
+  const remainingMinutes = Math.max(1, Math.ceil(remainingMs / 60000));
+  return `로그인 실패가 너무 많습니다. 약 ${remainingMinutes}분 후 다시 시도해 주세요.`;
+}
+
+function enforceLoginRateLimit(db, keyHash, timestampMs = Date.now()) {
+  const attempt = db.loginAttempts.find((entry) => entry.keyHash === keyHash);
+  if (attempt && dateMs(attempt.lockedUntil) > timestampMs) {
+    throw new Error(loginRateLimitMessage(attempt.lockedUntil));
+  }
+}
+
+function recordLoginFailure(db, keyHash, timestampMs = Date.now()) {
+  const timestamp = new Date(timestampMs).toISOString();
+  let attempt = db.loginAttempts.find((entry) => entry.keyHash === keyHash);
+  if (!attempt || timestampMs - dateMs(attempt.firstFailedAt) > LOGIN_RATE_LIMIT_WINDOW_MS) {
+    attempt = normalizeLoginAttempt({
+      keyHash,
+      count: 0,
+      firstFailedAt: timestamp,
+      lastFailedAt: timestamp,
+      lockedUntil: null,
+    });
+    db.loginAttempts = db.loginAttempts.filter((entry) => entry.keyHash !== keyHash);
+    db.loginAttempts.push(attempt);
+  }
+
+  attempt.count += 1;
+  attempt.lastFailedAt = timestamp;
+  if (attempt.count >= LOGIN_RATE_LIMIT_MAX) {
+    attempt.lockedUntil = new Date(timestampMs + LOGIN_RATE_LIMIT_LOCK_MS).toISOString();
+  }
+}
+
+function clearLoginFailures(db, keyHash) {
+  db.loginAttempts = db.loginAttempts.filter((entry) => entry.keyHash !== keyHash);
 }
 
 function sessionFromRequest(req, db) {
@@ -1113,24 +1211,46 @@ async function handleRequest(req, res) {
         const db = await readDB();
         const adminId = normalizeAdminId(body.adminId);
         const password = String(body.password || "");
+        const keyHash = loginAttemptKey(req, adminId);
+        const timestampMs = Date.now();
+        pruneLoginAttempts(db, timestampMs);
+        try {
+          enforceLoginRateLimit(db, keyHash, timestampMs);
+        } catch (error) {
+          await writeDB(db);
+          throw error;
+        }
+        const failLogin = async (message) => {
+          recordLoginFailure(db, keyHash, timestampMs);
+          audit(db, "admin_login_failed", null, null, { adminId });
+          await writeDB(db);
+          throw new Error(message);
+        };
         const admin = db.admins.find((entry) => entry.adminId === adminId);
         if (!admin) {
+          await failLogin("관리자 ID 또는 비밀번호가 올바르지 않습니다.");
           throw new Error("관리자 ID 또는 비밀번호가 올바르지 않습니다.");
         }
         if (admin.status === "pending") {
+          await failLogin("관리자 승인 대기 중입니다.");
           throw new Error("관리자 승인 대기 중입니다.");
         }
         if (admin.status === "rejected") {
+          await failLogin("거절된 관리자 신청입니다.");
           throw new Error("거절된 관리자 신청입니다.");
         }
         if (admin.status === "suspended") {
+          await failLogin("정지된 관리자 계정입니다.");
           throw new Error("정지된 관리자 계정입니다.");
         }
         if (!verifyPassword(password, admin)) {
+          await failLogin("관리자 ID 또는 비밀번호가 올바르지 않습니다.");
           throw new Error("관리자 ID 또는 비밀번호가 올바르지 않습니다.");
         }
 
         admin.status = "active";
+        clearLoginFailures(db, keyHash);
+        audit(db, "admin_login", admin.id, admin.id);
         const { token } = createAdminSession(db, admin);
         await writeDB(db);
         return { admin: publicAdmin(admin), token };
@@ -1208,6 +1328,7 @@ async function handleRequest(req, res) {
         admin.reviewedAt = timestamp;
         admin.updatedAt = timestamp;
         mutationDB.sessions = mutationDB.sessions.filter((session) => session.adminId !== admin.id);
+        audit(mutationDB, "admin_approve", auth.admin.id, admin.id, { adminId: admin.adminId });
         await writeDB(mutationDB);
         return publicAdmin(admin);
       }).catch((error) => ({ error }));
@@ -1246,6 +1367,7 @@ async function handleRequest(req, res) {
         admin.reviewedAt = timestamp;
         admin.updatedAt = timestamp;
         mutationDB.sessions = mutationDB.sessions.filter((session) => session.adminId !== admin.id);
+        audit(mutationDB, "admin_reject", auth.admin.id, admin.id, { adminId: admin.adminId });
         await writeDB(mutationDB);
         return publicAdmin(admin);
       }).catch((error) => ({ error }));
@@ -1282,8 +1404,110 @@ async function handleRequest(req, res) {
         admin.reviewedAt = timestamp;
         admin.updatedAt = timestamp;
         mutationDB.sessions = mutationDB.sessions.filter((session) => session.adminId !== admin.id);
+        audit(mutationDB, "admin_suspend", auth.admin.id, admin.id, { adminId: admin.adminId });
         await writeDB(mutationDB);
         return publicAdmin(admin);
+      }).catch((error) => ({ error }));
+
+      if (result.error) {
+        badRequest(res, result.error.message);
+        return;
+      }
+      sendJson(res, 200, result);
+      return;
+    }
+
+    match = pathname.match(/^\/api\/admin\/admins\/([^/]+)\/transfer-owner$/);
+    if (method === "POST" && match) {
+      const db = await readDB();
+      const auth = requireOwner(req, res, db);
+      if (!auth) {
+        return;
+      }
+      const body = await readBody(req);
+      const result = await enqueueMutation(async () => {
+        const mutationDB = await readDB();
+        const currentOwner = mutationDB.admins.find((entry) => entry.id === auth.admin.id);
+        const nextOwner = mutationDB.admins.find((entry) => entry.id === decodeURIComponent(match[1]));
+        if (!currentOwner || currentOwner.role !== "owner" || currentOwner.status !== "active") {
+          throw new Error("현재 Owner 권한을 다시 확인할 수 없습니다.");
+        }
+        if (!verifyPassword(String(body.password || ""), currentOwner)) {
+          throw new Error("Owner 비밀번호가 올바르지 않습니다.");
+        }
+        if (!nextOwner) {
+          throw new Error("관리자를 찾을 수 없습니다.");
+        }
+        if (nextOwner.id === currentOwner.id) {
+          throw new Error("자기 자신에게 Owner를 이전할 수 없습니다.");
+        }
+        if (nextOwner.role !== "admin" || nextOwner.status !== "active") {
+          throw new Error("활성 Admin에게만 Owner를 이전할 수 있습니다.");
+        }
+        const confirmText = String(body.confirmText || "").trim();
+        if (confirmText !== nextOwner.adminId) {
+          throw new Error("확인용 관리자 ID가 일치하지 않습니다.");
+        }
+
+        const timestamp = now();
+        mutationDB.admins.forEach((admin) => {
+          if (admin.role === "owner") {
+            admin.role = "admin";
+            admin.status = "active";
+            admin.updatedAt = timestamp;
+          }
+        });
+        nextOwner.role = "owner";
+        nextOwner.status = "active";
+        nextOwner.approvedAt = nextOwner.approvedAt || timestamp;
+        nextOwner.reviewedBy = currentOwner.id;
+        nextOwner.reviewedAt = timestamp;
+        nextOwner.updatedAt = timestamp;
+        audit(mutationDB, "owner_transfer", currentOwner.id, nextOwner.id, {
+          previousOwnerAdminId: currentOwner.adminId,
+          nextOwnerAdminId: nextOwner.adminId,
+        });
+        await writeDB(mutationDB);
+        return {
+          previousOwner: publicAdmin(currentOwner),
+          newOwner: publicAdmin(nextOwner),
+        };
+      }).catch((error) => ({ error }));
+
+      if (result.error) {
+        badRequest(res, result.error.message);
+        return;
+      }
+      sendJson(res, 200, result);
+      return;
+    }
+
+    match = pathname.match(/^\/api\/admin\/admins\/([^/]+)$/);
+    if (method === "DELETE" && match) {
+      const db = await readDB();
+      const auth = requireOwner(req, res, db);
+      if (!auth) {
+        return;
+      }
+      const result = await enqueueMutation(async () => {
+        const mutationDB = await readDB();
+        const adminId = decodeURIComponent(match[1]);
+        const admin = mutationDB.admins.find((entry) => entry.id === adminId);
+        if (!admin) {
+          throw new Error("관리자를 찾을 수 없습니다.");
+        }
+        if (admin.role === "owner") {
+          throw new Error("Owner 계정은 삭제할 수 없습니다. 먼저 Owner를 이전해 주세요.");
+        }
+        const deletedAdmin = publicAdmin(admin);
+        mutationDB.admins = mutationDB.admins.filter((entry) => entry.id !== admin.id);
+        mutationDB.sessions = mutationDB.sessions.filter((session) => session.adminId !== admin.id);
+        audit(mutationDB, "admin_delete", auth.admin.id, admin.id, {
+          deletedAdminId: admin.adminId,
+          deletedStatus: admin.status,
+        });
+        await writeDB(mutationDB);
+        return { deleted: true, admin: deletedAdmin };
       }).catch((error) => ({ error }));
 
       if (result.error) {

@@ -430,6 +430,7 @@ function renderAdminManagement(admins) {
               <div class="actions">
                 <button class="btn primary" onclick="approveAdmin('${admin.id}')">승인</button>
                 <button class="btn" onclick="rejectAdmin('${admin.id}')">거절</button>
+                <button class="btn danger" onclick="deleteAdmin('${admin.id}')">삭제</button>
               </div>
             `)).join("") : '<div class="empty">승인 대기 중인 신청이 없습니다.</div>'}
           </div>
@@ -444,7 +445,9 @@ function renderAdminManagement(admins) {
           <div class="table-list">
             ${activeAdmins.length ? activeAdmins.map((admin) => renderRow(admin, `
               <div class="actions">
+                <button class="btn primary" onclick="transferOwner('${admin.id}')">Owner 이전</button>
                 <button class="btn" onclick="suspendAdmin('${admin.id}')">정지</button>
+                <button class="btn danger" onclick="deleteAdmin('${admin.id}')">삭제</button>
               </div>
             `)).join("") : '<div class="empty">활성 관리자 계정이 없습니다.</div>'}
           </div>
@@ -457,7 +460,11 @@ function renderAdminManagement(admins) {
                 </div>
               </div>
               <div class="table-list">
-                ${inactiveAdmins.map((admin) => renderRow(admin)).join("")}
+                ${inactiveAdmins.map((admin) => renderRow(admin, `
+                  <div class="actions">
+                    <button class="btn danger" onclick="deleteAdmin('${admin.id}')">삭제</button>
+                  </div>
+                `)).join("")}
               </div>
             </div>
           ` : ""}
@@ -836,6 +843,45 @@ async function suspendAdmin(id) {
   if (!confirm("이 관리자 계정을 정지할까요?")) return;
   await api(`/api/admin/admins/${id}/suspend`, { method: "POST" });
   await adminHome();
+}
+
+async function deleteAdmin(id) {
+  const admin = dashboardAdmins.find((entry) => entry.id === id);
+  const label = admin ? `${admin.name || admin.adminId} (${admin.adminId})` : "이 관리자";
+  if (!confirm(`${label} 계정을 삭제할까요?\n삭제된 계정은 로그인할 수 없고 세션도 모두 해제됩니다.`)) return;
+  try {
+    await api(`/api/admin/admins/${id}`, { method: "DELETE" });
+    await adminHome();
+  } catch (error) {
+    handleAdminError(error);
+  }
+}
+
+async function transferOwner(id) {
+  const admin = dashboardAdmins.find((entry) => entry.id === id);
+  if (!admin) {
+    alert("관리자 정보를 찾을 수 없습니다.");
+    return;
+  }
+  if (!confirm(`${admin.name || admin.adminId} 관리자에게 Owner 권한을 이전할까요?\n이후 현재 Owner는 일반 Admin으로 변경됩니다.`)) return;
+  const password = prompt("현재 Owner 비밀번호를 입력해 주세요.");
+  if (!password) return;
+  const confirmText = prompt(`확인을 위해 이전 대상 관리자 ID를 입력해 주세요: ${admin.adminId}`);
+  if (confirmText !== admin.adminId) {
+    alert("관리자 ID가 일치하지 않아 이전을 취소합니다.");
+    return;
+  }
+  try {
+    await api(`/api/admin/admins/${id}/transfer-owner`, {
+      method: "POST",
+      body: { password, confirmText },
+    });
+    await loadAuthContext();
+    alert("Owner 이전이 완료되었습니다. 현재 계정은 일반 Admin 권한으로 전환되었습니다.");
+    await adminHome();
+  } catch (error) {
+    handleAdminError(error);
+  }
 }
 
 function setFilter(filter) {
