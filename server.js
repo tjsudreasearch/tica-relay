@@ -1939,14 +1939,13 @@ if (require.main === module) {
     console.log(`TiCa Relay running on http://localhost:${PORT}`);
   });
 } else {
-  module.exports = {
-    createServer,
-    handleRequest,
-    readDB,
-    writeDB,
-    publicProject,
-    exportProjectText,
-    normalizeProject,
-    countCharacters,
-  };
+  module.exports = handleRequest;
+  module.exports.createServer = createServer;
+  module.exports.handleRequest = handleRequest;
+  module.exports.readDB = readDB;
+  module.exports.writeDB = writeDB;
+  module.exports.publicProject = publicProject;
+  module.exports.exportProjectText = exportProjectText;
+  module.exports.normalizeProject = normalizeProject;
+  module.exports.countCharacters = countCharacters;
 }
